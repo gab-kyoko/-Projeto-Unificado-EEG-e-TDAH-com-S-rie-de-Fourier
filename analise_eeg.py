@@ -1,9 +1,8 @@
-# --- Bloco de Importação de Bibliotecas ---
+# --- Imports ---
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import traceback
-
 import customtkinter as ctk
 import numpy as np
 import scipy.io as sio
@@ -12,428 +11,494 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pywt
 
-# --- Bloco de Configurações e Constantes Globais ---
-COLORS = {
-    "navy": "#0E1627",
-    "prune": "#7F6269",
-    "mauve": "#BD8E89",
-    "pink": "#E5C5C1",
-    "blush": "#F4E1E0",
-    "text_dark": "#0E1627",
-    "yellow": "#FFD700"
-}
+# --- Consts e Configs ---
+# Cores da UI
+CORES = {
+            "navy": "#0E1627", "prune": "#7F6269", "mauve": "#BD8E89",
+            "rosa": "#E5C5C1", "blush": "#F4E1E0", "text_dark": "#0E1627",
+            "amarelo": "#FFD700"
+        }
 
-BANDS = {'theta': [4, 8], 'beta': [13, 30]}
-FS = 256
+# Bandas de freq. p/ análise
+BANDAS = {'theta': [4, 8], 'beta': [13, 30]}
+FS_AMOSTRA = 256 # Freq. amostragem em Hz
 
-# --- Funções de Análise de Sinal ---
-def apply_bandpass_filter(data, lowcut, highcut, fs, order=4):
-    nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = butter(order, [low, high], btype='band')
-    return filtfilt(b, a, data)
+# --- Funcs de Análise de Sinal ---
+def filtrar_passa_banda_sinal(dados_sinal, corte_inf_hz, corte_sup_hz, fs_hz, ordem=4):
+    nyquist = 0.5 * fs_hz
+    baixo_norm = corte_inf_hz / nyquist
+    alto_norm = corte_sup_hz / nyquist
+    b, a = butter(ordem, [baixo_norm, alto_norm], btype='band')
+    return filtfilt(b, a, dados_sinal)
 
-def analyze_signal_with_fft(signal, fs, bands):
-    signal_filtered = apply_bandpass_filter(signal, 0.5, 50, fs)
-    n = len(signal_filtered)
-    window = np.hanning(n)
-    signal_windowed = signal_filtered * window
-    yf = np.fft.fft(signal_windowed)
-    xf = np.fft.fftfreq(n, 1 / fs)[:n//2]
-    psd = (2.0/n * np.abs(yf[0:n//2]))**2
-    
-    power_in_bands = {}
-    for band_name, (low_freq, high_freq) in bands.items():
-        band_indices = np.where((xf >= low_freq) & (xf <= high_freq))[0]
-        power_in_bands[band_name] = np.trapz(psd[band_indices], xf[band_indices]) if len(band_indices) > 0 else 0
-    
-    beta_power = power_in_bands.get('beta', 0)
-    tbr = power_in_bands.get('theta', 0) / beta_power if beta_power > 1e-12 else 0
+"""Calcula Razão Teta/Beta (TBR) via FFT."""
+def calc_tbr_fft(sinal_eeg_raw, fs_hz, bandas_ref):
+    sinal_filtrado = filtrar_passa_banda_sinal(sinal_eeg_raw, 0.5, 50, fs_hz)
+    num_amostras = len(sinal_filtrado)
+    janela = np.hanning(num_amostras)
+    sinal_janelado = sinal_filtrado * janela
+    yf = np.fft.fft(sinal_janelado)
+    xf = np.fft.fftfreq(num_amostras, 1 / fs_hz)[:num_amostras//2]
+    psd = (2.0/num_amostras * np.abs(yf[0:num_amostras//2]))**2
+
+    potencia_bands = {}
+    for nome_b, (f_inicio, f_fim) in bandas_ref.items():
+        indices = np.where((xf >= f_inicio) & (xf <= f_fim))[0]
+        potencia_bands[nome_b] = np.trapz(psd[indices], xf[indices]) if len(indices) > 0 else 0.0
+
+    pot_beta = potencia_bands.get('beta', 0.0)
+    pot_theta = potencia_bands.get('theta', 0.0)
+    tbr = pot_theta / (pot_beta if pot_beta > 1e-12 else 1e-12)
     return tbr
 
-def analyze_signal_with_wavelet(signal, fs, wavelet='cmor1.5-1.0'):
-    freqs_of_interest = np.linspace(1, 50, 100)
-    scales = pywt.scale2frequency(wavelet, freqs_of_interest) / (1/fs)
-    coeffs, freqs = pywt.cwt(signal, scales, wavelet, 1/fs)
-    power = np.abs(coeffs)**2
-    times = np.linspace(0, len(signal)/fs, power.shape[1])
-    return power, freqs, times
+"""Análise Tempo-Frequência (Wavelet)"""
+def analise_cwt_sinal(sinal, fs_hz, wavelet_tipo='cmor1.5-1.0'):
+    freqs_desejadas = np.linspace(1, 50, 100)
+    escalas = pywt.scale2frequency(wavelet_tipo, freqs_desejadas) / (1/fs_hz)
+    coefs, freqs = pywt.cwt(sinal, escalas, wavelet_tipo, 1/fs_hz)
+    potencia = np.abs(coefs)**2
+    tempos = np.linspace(0, len(sinal)/fs_hz, potencia.shape[1])
+    return potencia, freqs, tempos
 
-def calculate_spectrogram(signal, fs):
-    nperseg = fs
-    noverlap = fs // 2
-    freqs, times, Sxx = spectrogram(signal, fs=fs, window='hann', nperseg=nperseg, noverlap=noverlap, scaling='density')
-    return freqs, times, Sxx
 
-# --- Estrutura da Interface Gráfica ---
-class EEGAnalyzerApp(ctk.CTk):
+"""Calcula espectrograma do sinal"""
+def calc_espectrograma(sinal, fs_hz):
+    n_per_seg = fs_hz            # 1 seg de janela
+    n_overlap = fs_hz // 2       # 50% de sobreposição
+    freqs, tempos, Sxx = spectrogram(sinal, fs=fs_hz, window='hann',
+                                      nperseg=n_per_seg, noverlap=n_overlap, scaling='density')
+    return freqs, tempos, Sxx
+
+# --- UI App (CustomTkinter) ---
+"""App principal."""
+class AppEEG(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Analisador EEG")
+        self.title("Analisador EEG v1.0")
         self.geometry("800x950")
-        self.configure(fg_color=COLORS["navy"])
+        self.configure(fg_color=CORES["navy"])
 
-        self.phone_frame = ctk.CTkFrame(self, width=750, height=900, fg_color=COLORS["pink"], corner_radius=30)
-        self.phone_frame.pack(expand=True, pady=20)
-        self.phone_frame.pack_propagate(False)
+        self.frm_main_ui = ctk.CTkFrame(self, width=750, height=900, fg_color=CORES["rosa"], corner_radius=30)
+        self.frm_main_ui.pack(expand=True, pady=20)
+        self.frm_main_ui.pack_propagate(False)
 
-        self.frames = {}
-        self.create_screens()
-        self.show_frame("HomeScreen")
+        self.dict_telas = {}
+        self._setup_telas_ui()
+        self.mostrar_tela("Tela_Inicial")
 
-    def create_screens(self):
-        self.frames["HomeScreen"] = HomeScreen(self.phone_frame, controller=self)
-        self.frames["ResultsScreen"] = ResultsScreen(self.phone_frame, controller=self)
+    def _setup_telas_ui(self):
+        self.dict_telas["Tela_Inicial"] = TelaInicialUI(self.frm_main_ui, ctrl=self)
+        self.dict_telas["Tela_Resultados"] = TelaResultadosUI(self.frm_main_ui, ctrl=self)
 
-    def show_frame(self, screen_name):
-        for frame in self.frames.values():
-            frame.pack_forget()
-        frame_to_show = self.frames[screen_name]
-        frame_to_show.pack(fill="both", expand=True)
+    def mostrar_tela(self, nome_tela_id):
+        for tela in self.dict_telas.values():
+            tela.pack_forget()
+        self.dict_telas[nome_tela_id].pack(fill="both", expand=True)
 
-    def run_analysis_and_show_results(self):
-        home_screen = self.frames["HomeScreen"]
-        results_screen = self.frames["ResultsScreen"]
+    def iniciar_analise_e_show_results(self):
+        tela_init_ref = self.dict_telas["Tela_Inicial"]
+        tela_results_ref = self.dict_telas["Tela_Resultados"]
         
-        home_screen.lbl_status.configure(text="Analisando... Isso pode levar um momento.", text_color=COLORS["prune"])
-        self.update_idletasks()
+        tela_init_ref.lbl_status_app.configure(text="Processando... Aguarde.", text_color=CORES["prune"])
+        self.update_idletasks() # Força update da UI
+
         try:
-            loaded_data = results_screen.load_mat_data(home_screen.data_folder_path)
-            results_screen.loaded_data = loaded_data
-            analysis_results = results_screen.analyze_loaded_data(loaded_data)
-            results_screen.analysis_results = analysis_results
-            results_screen.plot_all_results()
-            self.show_frame("ResultsScreen")
-            home_screen.lbl_status.configure(text="Análise Concluída!", text_color=COLORS["mauve"])
-        except Exception as e:
-            home_screen.lbl_status.configure(text=f"Erro: {e}", text_color="red")
-            messagebox.showerror("Erro na Análise", f"Ocorreu um erro:\n{e}")
+            dados_lidos = tela_results_ref.carregar_mat_data(tela_init_ref.path_pasta_data)
+            tela_results_ref.dados_eeg_carregados = dados_lidos
+
+            analise_res = tela_results_ref.exec_analise_dados(dados_lidos)
+            tela_results_ref.resultados_analise_obj = analise_res
+
+            tela_results_ref.plotar_todos_os_grafs() # Desenha tudo
+            self.mostrar_tela("Tela_Resultados")
+            tela_init_ref.lbl_status_app.configure(text="Análise Completa!", text_color=CORES["mauve"])
+
+        except FileNotFoundError as fnf_err:
+            tela_init_ref.lbl_status_app.configure(text=f"Erro: {fnf_err}", text_color="red")
+            messagebox.showerror("Erro Arquivo", f"Arquivo não encontrado:\n{fnf_err}")
+            traceback.print_exc()
+        except Exception as e_geral:
+            tela_init_ref.lbl_status_app.configure(text=f"Falha: {e_geral}", text_color="red")
+            messagebox.showerror("Erro Geral", f"Problema inesperado:\n{e_geral}")
             traceback.print_exc()
 
-class HomeScreen(ctk.CTkFrame):
-    def __init__(self, parent, controller):
-        super().__init__(parent, fg_color="transparent")
-        self.controller = controller
-        self.data_folder_path = ""
+
+class TelaInicialUI(ctk.CTkFrame):
+    def __init__(self, pai_frm, ctrl):
+        super().__init__(pai_frm, fg_color="transparent")
+        self.ctrl = ctrl
+        self.path_pasta_data = "" # Guarda o caminho da pasta
         
         ctk.CTkLabel(self, text="🧠🦋", font=ctk.CTkFont(size=60)).pack(pady=(80, 10))
-        ctk.CTkLabel(self, text="Analisador EEG", font=ctk.CTkFont(size=28, weight="bold"), text_color=COLORS["text_dark"]).pack()
-        ctk.CTkLabel(self, text="Análise de TDAH", font=ctk.CTkFont(size=18), text_color=COLORS["prune"]).pack(pady=(0, 60))
+        ctk.CTkLabel(self, text="Analisador EEG", font=ctk.CTkFont(size=28, weight="bold"), text_color=CORES["text_dark"]).pack()
+        ctk.CTkLabel(self, text="Análise de TDAH", font=ctk.CTkFont(size=18), text_color=CORES["prune"]).pack(pady=(0, 60))
         
-        self.btn_select_folder = ctk.CTkButton(self, text="Selecionar Pasta de Dados", corner_radius=15, command=self.on_select_folder_click, fg_color=COLORS["mauve"], text_color=COLORS["blush"], hover_color=COLORS["prune"])
-        self.btn_select_folder.pack(pady=20, padx=40, ipady=10, fill="x")
-        self.lbl_folder_path = ctk.CTkLabel(self, text="", text_color=COLORS["prune"])
-        self.lbl_folder_path.pack(pady=5)
-        self.btn_run_analysis = ctk.CTkButton(self, text="INICIAR ANÁLISE", corner_radius=15, command=controller.run_analysis_and_show_results, state="disabled", fg_color=COLORS["prune"], text_color=COLORS["blush"], hover_color=COLORS["mauve"], font=ctk.CTkFont(size=16, weight="bold"))
-        self.btn_run_analysis.pack(pady=20, padx=40, ipady=10, fill="x")
-        self.lbl_status = ctk.CTkLabel(self, text="Selecione uma pasta para começar", text_color=COLORS["mauve"])
-        self.lbl_status.pack(pady=20)
+        self.btn_sel_pasta = ctk.CTkButton(self, text="Selecionar Pasta Dados", corner_radius=15,
+                                           command=self.acao_selecionar_pasta,
+                                           fg_color=CORES["mauve"], text_color=CORES["blush"], hover_color=CORES["prune"])
+        self.btn_sel_pasta.pack(pady=20, padx=40, ipady=10, fill="x")
         
-    def on_select_folder_click(self):
-        self.data_folder_path = filedialog.askdirectory()
-        if self.data_folder_path:
-            self.lbl_folder_path.configure(text=f"Pasta: ...{os.path.basename(self.data_folder_path)}")
-            self.btn_run_analysis.configure(state="normal")
-            self.lbl_status.configure(text="Pronto para analisar!")
-
-class ResultsScreen(ctk.CTkFrame):
-    def __init__(self, parent, controller):
-        super().__init__(parent, fg_color="transparent")
-        self.controller = controller
-        self.loaded_data = {}
-        self.analysis_results = {}
-
-        header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        header_frame.pack(fill="x", padx=10, pady=10)
-        back_arrow = ctk.CTkButton(header_frame, text="← Voltar", command=lambda: controller.show_frame("HomeScreen"), fg_color="transparent", text_color=COLORS["prune"], hover_color=COLORS["pink"], width=50)
-        back_arrow.pack(side="left")
-        ctk.CTkLabel(header_frame, text="Resultados da Análise", font=ctk.CTkFont(size=20, weight="bold"), text_color=COLORS["text_dark"]).pack(side="left", expand=True)
-
-        self.tabview = ctk.CTkTabview(self, fg_color=COLORS["pink"])
-        self.tabview.pack(pady=10, padx=10, fill="both", expand=True)
-        self.tab_group = self.tabview.add("Comparação")
-        self.tab_individual = self.tabview.add("Caso Individual")
-        self.tab_average = self.tabview.add("Análises Médias")
-        self.tab_sliding = self.tabview.add("Média e Variância")
+        self.lbl_path_pasta = ctk.CTkLabel(self, text="", text_color=CORES["prune"])
+        self.lbl_path_pasta.pack(pady=5)
         
-        # Variáveis de controle para a aba de Média e Variância
-        self.sliding_adhd_tbr_choice_var = ctk.StringVar(value="TBR Mais Alto")
-        self.sliding_ctrl_tbr_choice_var = ctk.StringVar(value="TBR Mais Baixo")
-        self.sliding_gender_selector_var = ctk.StringVar(value="Geral")
+        self.btn_iniciar_analise = ctk.CTkButton(self, text="INICIAR ANÁLISE", corner_radius=15,
+                                                 command=ctrl.iniciar_analise_e_show_results, state="disabled",
+                                                 fg_color=CORES["prune"], text_color=CORES["blush"], hover_color=CORES["mauve"],
+                                                 font=ctk.CTkFont(size=16, weight="bold"))
+        self.btn_iniciar_analise.pack(pady=20, padx=40, ipady=10, fill="x")
+        
+        self.lbl_status_app = ctk.CTkLabel(self, text="Escolha a pasta dos dados", text_color=CORES["mauve"])
+        self.lbl_status_app.pack(pady=20)
+        
+    def acao_selecionar_pasta(self):
+        caminho = filedialog.askdirectory()
+        if caminho:
+            self.path_pasta_data = caminho
+            self.lbl_path_pasta.configure(text=f"Pasta: ...{os.path.basename(self.path_pasta_data)}")
+            self.btn_iniciar_analise.configure(state="normal")
+            self.lbl_status_app.configure(text="Pronto pra rodar!", text_color=CORES["mauve"])
+        else:
+            self.btn_iniciar_analise.configure(state="disabled")
+            self.lbl_status_app.configure(text="Nenhuma pasta selecionada.", text_color="orange")
 
-    def load_mat_data(self, folder_path):
-        data = {'F-ADHD': [], 'F-Ctrl': [], 'M-ADHD': [], 'M-Ctrl': []}
-        files_map = {'F-ADHD': 'FADHD.mat', 'F-Ctrl': 'FC.mat', 'M-ADHD': 'MADHD.mat', 'M-Ctrl': 'MC.mat'}
-        for group, filename in files_map.items():
-            path = os.path.join(folder_path, filename)
-            if not os.path.exists(path): raise FileNotFoundError(f"Arquivo não encontrado: {filename}")
-            mat = sio.loadmat(path)
-            # CORREÇÃO APLICADA: 'k' duplicado removido
-            key = [k for k in mat if not k.startswith('__')][0]
-            subjects_raw = mat[key].flatten()
-            for subj_raw in subjects_raw:
-                subj_data = subj_raw[0] if isinstance(subj_raw, np.ndarray) and subj_raw.size > 0 else subj_raw
+
+class TelaResultadosUI(ctk.CTkFrame):
+    def __init__(self, pai_frm, ctrl):
+        super().__init__(pai_frm, fg_color="transparent")
+        self.ctrl = ctrl
+        self.dados_eeg_carregados = {}
+        self.resultados_analise_obj = {}
+
+        header_frm = ctk.CTkFrame(self, fg_color="transparent")
+        header_frm.pack(fill="x", padx=10, pady=10)
+        btn_voltar = ctk.CTkButton(header_frm, text="← Voltar", command=lambda: ctrl.mostrar_tela("Tela_Inicial"),
+                                   fg_color="transparent", text_color=CORES["prune"], hover_color=CORES["rosa"], width=50)
+        btn_voltar.pack(side="left")
+        ctk.CTkLabel(header_frm, text="Resultados", font=ctk.CTkFont(size=20, weight="bold"), text_color=CORES["text_dark"]).pack(side="left", expand=True)
+
+        self.tab_view_res = ctk.CTkTabview(self, fg_color=CORES["rosa"])
+        self.tab_view_res.pack(pady=10, padx=10, fill="both", expand=True)
+        self.tab_grupo_comp = self.tab_view_res.add("Comp. Grupos")
+        self.tab_indiv_analise = self.tab_view_res.add("Caso Individual")
+        self.tab_medias_analise = self.tab_view_res.add("Análises Médias")
+        self.tab_sliding_analise = self.tab_view_res.add("Média e Variância")
+        
+        self.var_sliding_adhd_tbr = ctk.StringVar(value="TBR Mais Alto")
+        self.var_sliding_ctrl_tbr = ctk.StringVar(value="TBR Mais Baixo")
+        self.var_sliding_gen_sel = ctk.StringVar(value="Geral")
+
+        self.frame_plots_media_tab = None # Será criado
+        self.frame_plots_sliding_tab = None # Será criado
+
+    def carregar_mat_data(self, dir_path):
+        data = {'F-TDAH': [], 'F-Ctrl': [], 'M-TDAH': [], 'M-Ctrl': []}
+        arqs_map = {'F-TDAH': 'FADHD.mat', 'F-Ctrl': 'FC.mat', 'M-TDAH': 'MADHD.mat', 'M-Ctrl': 'MC.mat'}
+        
+        for grupo, nome_arq in arqs_map.items():
+            path_completo = os.path.join(dir_path, nome_arq)
+            if not os.path.exists(path_completo):
+                raise FileNotFoundError(f"Arquivo '{nome_arq}' faltando.")
+            
+            mat = sio.loadmat(path_completo)
+            chave = next(k for k in mat if not k.startswith('__')) # Pega a 1a chave válida
+            sujeitos_raw = mat[chave].flatten() # Acha os dados
+
+            for subj_data_raw in sujeitos_raw:
+                subj_data = subj_data_raw[0] if isinstance(subj_data_raw, np.ndarray) and subj_data_raw.size > 0 else subj_data_raw
                 if subj_data.ndim == 1: subj_data = subj_data.reshape(1, -1)
-                if subj_data.shape[0] > subj_data.shape[1]: subj_data = subj_data.T
-                data[group].append(subj_data)
+                if subj_data.shape[0] > subj_data.shape[1]: subj_data = subj_data.T # Garante formato (canais, amostras)
+                data[grupo].append(subj_data)
         return data
 
-    def analyze_loaded_data(self, data):
-        results = {'tbr_by_group': {}}
-        for group, subjects in data.items():
-            results['tbr_by_group'][group] = [analyze_signal_with_fft(s[0, :], FS, BANDS) for s in subjects]
+    def exec_analise_dados(self, data_carregada):
+        results = {'tbr_por_grupo': {}}
+        for grupo, sujeitos_sinais in data_carregada.items():
+            results['tbr_por_grupo'][grupo] = [calc_tbr_fft(s[0, :], FS_AMOSTRA, BANDAS) for s in sujeitos_sinais]
         return results
 
-    def _apply_plot_style(self, ax, fig, title):
-        fig.patch.set_facecolor(COLORS["pink"])
-        ax.set_facecolor(COLORS["pink"])
-        ax.set_title(title, color=COLORS["text_dark"], fontsize=12, weight="bold")
-        ax.tick_params(axis='both', colors=COLORS["prune"])
-        ax.xaxis.label.set_color(COLORS["prune"])
-        ax.yaxis.label.set_color(COLORS["prune"])
-        for spine in ax.spines.values(): spine.set_edgecolor(COLORS["prune"])
-        ax.grid(True, linestyle='--', color=COLORS["mauve"], alpha=0.3)
-        return ax
+    def _estilo_grafico_padrao(self, ax_obj, fig_obj, titulo_str):
+        fig_obj.patch.set_facecolor(CORES["rosa"])
+        ax_obj.set_facecolor(CORES["rosa"])
+        ax_obj.set_title(titulo_str, color=CORES["text_dark"], fontsize=12, weight="bold")
+        ax_obj.tick_params(axis='both', colors=CORES["prune"])
+        ax_obj.xaxis.label.set_color(CORES["prune"])
+        ax_obj.yaxis.label.set_color(CORES["prune"])
+        for spine in ax_obj.spines.values(): spine.set_edgecolor(CORES["prune"])
+        ax_obj.grid(True, linestyle='--', color=CORES["mauve"], alpha=0.3)
+        return ax_obj
 
-    def plot_all_results(self):
-        self.plot_group_comparison()
-        self.create_individual_analysis_tab()
-        self.update_individual_plots()
-        self.create_average_analysis_tab()
-        self.plot_average_analyses(self.gender_selector.get())
-        self.create_sliding_window_analysis_tab()
-        self.update_sliding_window_plots()
+    def plotar_todos_os_grafs(self):
+        self.plot_comp_grupos_tbr()
+        self.setup_analise_indiv_ui()
+        self.atualizar_plots_indiv()
+        self.setup_analise_media_ui()
+        self.atualizar_plots_media(self.genero_selecionar_media.get()) # Ugh, nome inconsistente, mas vai.
+        self.setup_analise_sliding_ui()
+        self.atualizar_plots_sliding()
 
-    def plot_group_comparison(self):
-        for widget in self.tab_group.winfo_children(): widget.destroy()
-        canvas_frame = ctk.CTkFrame(self.tab_group, fg_color="transparent")
-        canvas_frame.pack(fill="both", expand=True, pady=10)
+    def plot_comp_grupos_tbr(self):
+        for widget in self.tab_grupo_comp.winfo_children(): widget.destroy()
+        canvas_frm = ctk.CTkFrame(self.tab_grupo_comp, fg_color="transparent")
+        canvas_frm.pack(fill="both", expand=True, pady=10)
+        
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frm)
         canvas.get_tk_widget().pack(fill="both", expand=True)
-        tbr_data = self.analysis_results['tbr_by_group']
-        data_to_plot = [tbr_data['F-ADHD'], tbr_data['F-Ctrl'], tbr_data['M-ADHD'], tbr_data['M-Ctrl']]
+        
+        tbr_data = self.resultados_analise_obj['tbr_por_grupo']
+        data_plot = [tbr_data['F-TDAH'], tbr_data['F-Ctrl'], tbr_data['M-TDAH'], tbr_data['M-Ctrl']]
         labels = ['TDAH (F)', 'Controle (F)', 'TDAH (M)', 'Controle (M)']
-        box = ax.boxplot(data_to_plot, labels=labels, patch_artist=True, widths=0.5)
-        colors = [COLORS["mauve"], COLORS["prune"], COLORS["mauve"], COLORS["prune"]]
-        for patch, color in zip(box['boxes'], colors): patch.set_facecolor(color)
-        for median in box['medians']: median.set(color=COLORS['yellow'], linewidth=2)
-        self._apply_plot_style(ax, fig, "Razão Teta/Beta por Grupo")
+        
+        box = ax.boxplot(data_plot, labels=labels, patch_artist=True, widths=0.5)
+        cores_box = [CORES["mauve"], CORES["prune"], CORES["mauve"], CORES["prune"]]
+        for patch, color in zip(box['boxes'], cores_box): patch.set_facecolor(color)
+        for median in box['medians']: median.set(color=CORES['amarelo'], linewidth=2)
+        
+        self._estilo_grafico_padrao(ax, fig, "TBR por Grupo")
         ax.set_ylabel("TBR")
-        legend_text = ('LEGENDA DO GRÁFICO:\n' '----------------------------------\n' '●  Linha Amarela: Mediana\n' '■  Caixa: 50% centrais dos dados\n' '─  Linhas Pretas: Mínimo e Máximo\n' '○  Círculos: Outliers')
-        props = dict(boxstyle='round,pad=0.5', facecolor=COLORS["blush"], alpha=0.95, edgecolor=COLORS["prune"])
-        ax.text(0.03, 0.97, legend_text, transform=ax.transAxes, fontsize=9, verticalalignment='top', horizontalalignment='left', bbox=props, color=COLORS["text_dark"])
+        
+        leg_txt = ('LEGENDA:\n' '● Amarela: Mediana\n' '■ Caixa: 50% dos dados\n' '─ Linhas: Min/Max\n' '○ Círculos: Outliers')
+        props = dict(boxstyle='round,pad=0.5', facecolor=CORES["blush"], alpha=0.95, edgecolor=CORES["prune"])
+        ax.text(0.03, 0.97, leg_txt, transform=ax.transAxes, fontsize=9, verticalalignment='top', horizontalalignment='left', bbox=props, color=CORES["text_dark"])
         fig.tight_layout()
         canvas.draw()
-        ctk.CTkButton(self.tab_group, text="💡 O que isso significa?", corner_radius=10, fg_color=COLORS["mauve"], text_color=COLORS["blush"], command=lambda: messagebox.showinfo("Insight sobre TBR", "Uma Razão Teta/Beta (TBR) mais alta no grupo TDAH é um biomarcador comum, sugerindo uma maturação cerebral mais lenta. A separação por gênero permite investigar se há diferenças neste padrão.")).pack(pady=10, padx=20)
         
-    def create_individual_analysis_tab(self):
-        for widget in self.tab_individual.winfo_children(): widget.destroy()
-        control_panel = ctk.CTkFrame(self.tab_individual, fg_color=COLORS["blush"])
-        control_panel.pack(fill="x", pady=10, padx=10)
-        ctk.CTkLabel(control_panel, text="Caso TDAH:", text_color=COLORS["text_dark"]).pack(side="left", padx=(10,5))
-        self.adhd_tbr_choice_var = ctk.StringVar(value="TBR Mais Alto")
-        ctk.CTkComboBox(control_panel, variable=self.adhd_tbr_choice_var, values=["TBR Mais Alto", "TBR Mais Baixo"]).pack(side="left", padx=5)
-        ctk.CTkLabel(control_panel, text="Caso Controle:", text_color=COLORS["text_dark"]).pack(side="left", padx=(20,5))
-        self.ctrl_tbr_choice_var = ctk.StringVar(value="TBR Mais Baixo")
-        ctk.CTkComboBox(control_panel, variable=self.ctrl_tbr_choice_var, values=["TBR Mais Alto", "TBR Mais Baixo"]).pack(side="left", padx=5)
-        ctk.CTkButton(control_panel, text="Atualizar Análise", command=self.update_individual_plots).pack(side="right", padx=10)
-        self.wavelet_frame = ctk.CTkFrame(self.tab_individual, fg_color="transparent")
-        self.wavelet_frame.pack(fill="both", expand=True, pady=5)
-        self.spectrogram_frame = ctk.CTkFrame(self.tab_individual, fg_color="transparent")
-        self.spectrogram_frame.pack(fill="both", expand=True, pady=5)
+        ctk.CTkButton(self.tab_grupo_comp, text="💡 Entender TBR", corner_radius=10, fg_color=CORES["mauve"], text_color=CORES["blush"],
+                      command=lambda: messagebox.showinfo("TBR Insight", "TBR alta em TDAH pode sugerir maturação cerebral mais lenta. Gênero ajuda a ver variações.")).pack(pady=10, padx=20)
+        
+    def setup_analise_indiv_ui(self):
+        for widget in self.tab_indiv_analise.winfo_children(): widget.destroy()
+        ctrl_pnl = ctk.CTkFrame(self.tab_indiv_analise, fg_color=CORES["blush"])
+        ctrl_pnl.pack(fill="x", pady=10, padx=10)
+        
+        ctk.CTkLabel(ctrl_pnl, text="Caso TDAH:", text_color=CORES["text_dark"]).pack(side="left", padx=(10,5))
+        self.var_tbr_adhd_indiv = ctk.StringVar(value="TBR Mais Alto")
+        ctk.CTkComboBox(ctrl_pnl, variable=self.var_tbr_adhd_indiv, values=["TBR Mais Alto", "TBR Mais Baixo"]).pack(side="left", padx=5)
+        
+        ctk.CTkLabel(ctrl_pnl, text="Caso Ctrl:", text_color=CORES["text_dark"]).pack(side="left", padx=(20,5))
+        self.var_tbr_ctrl_indiv = ctk.StringVar(value="TBR Mais Baixo")
+        ctk.CTkComboBox(ctrl_pnl, variable=self.var_tbr_ctrl_indiv, values=["TBR Mais Alto", "TBR Mais Baixo"]).pack(side="left", padx=5)
+        
+        ctk.CTkButton(ctrl_pnl, text="Atualizar", command=self.atualizar_plots_indiv).pack(side="right", padx=10)
+        
+        self.frm_wav_plot = ctk.CTkFrame(self.tab_indiv_analise, fg_color="transparent")
+        self.frm_wav_plot.pack(fill="both", expand=True, pady=5)
+        self.frm_spec_plot = ctk.CTkFrame(self.tab_indiv_analise, fg_color="transparent")
+        self.frm_spec_plot.pack(fill="both", expand=True, pady=5)
 
-    def update_individual_plots(self):
-        all_adhd_tbr = self.analysis_results['tbr_by_group']['F-ADHD'] + self.analysis_results['tbr_by_group']['M-ADHD']
-        all_adhd_signals = self.loaded_data['F-ADHD'] + self.loaded_data['M-ADHD']
-        all_ctrl_tbr = self.analysis_results['tbr_by_group']['F-Ctrl'] + self.analysis_results['tbr_by_group']['M-Ctrl']
-        all_ctrl_signals = self.loaded_data['F-Ctrl'] + self.loaded_data['M-Ctrl']
-        if not all_adhd_signals or not all_ctrl_signals: return
-        idx_adhd = np.argmax(all_adhd_tbr) if self.adhd_tbr_choice_var.get() == "TBR Mais Alto" else np.argmin(all_adhd_tbr)
-        idx_ctrl = np.argmax(all_ctrl_tbr) if self.ctrl_tbr_choice_var.get() == "TBR Mais Alto" else np.argmin(all_ctrl_tbr)
-        signal_adhd = all_adhd_signals[idx_adhd][0, :]
-        signal_ctrl = all_ctrl_signals[idx_ctrl][0, :]
-        for widget in self.wavelet_frame.winfo_children(): widget.destroy()
-        for widget in self.spectrogram_frame.winfo_children(): widget.destroy()
+    def atualizar_plots_indiv(self):
+        all_adhd_tbr = self.resultados_analise_obj['tbr_por_grupo'].get('F-TDAH', []) + self.resultados_analise_obj['tbr_por_grupo'].get('M-TDAH', [])
+        all_adhd_sinais = self.dados_eeg_carregados.get('F-TDAH', []) + self.dados_eeg_carregados.get('M-TDAH', [])
+        all_ctrl_tbr = self.resultados_analise_obj['tbr_por_grupo'].get('F-Ctrl', []) + self.resultados_analise_obj['tbr_por_grupo'].get('M-Ctrl', [])
+        all_ctrl_sinais = self.dados_eeg_carregados.get('F-Ctrl', []) + self.dados_eeg_carregados.get('M-Ctrl', [])
+        
+        if not all_adhd_sinais or not all_ctrl_sinais: return # Sem dados, sai
+
+        idx_adhd = np.argmax(all_adhd_tbr) if self.var_tbr_adhd_indiv.get() == "TBR Mais Alto" else np.argmin(all_adhd_tbr)
+        idx_ctrl = np.argmax(all_ctrl_tbr) if self.var_tbr_ctrl_indiv.get() == "TBR Mais Alto" else np.argmin(all_ctrl_tbr)
+        
+        sinal_adhd = all_adhd_sinais[idx_adhd][0, :]
+        sinal_ctrl = all_ctrl_sinais[idx_ctrl][0, :]
+        
+        for widget in self.frm_wav_plot.winfo_children(): widget.destroy()
+        for widget in self.frm_spec_plot.winfo_children(): widget.destroy()
+        
         fig_wav, (ax_wav_adhd, ax_wav_ctrl) = plt.subplots(1, 2, figsize=(10, 3.5))
-        canvas_wav = FigureCanvasTkAgg(fig_wav, master=self.wavelet_frame)
+        canvas_wav = FigureCanvasTkAgg(fig_wav, master=self.frm_wav_plot)
         canvas_wav.get_tk_widget().pack(fill="both", expand=True)
-        power_a, freqs_a, times_a = analyze_signal_with_wavelet(signal_adhd, FS)
-        im_a = ax_wav_adhd.contourf(times_a, freqs_a, power_a, levels=20, cmap='viridis')
-        self._apply_plot_style(ax_wav_adhd, fig_wav, f"Wavelet TDAH ({self.adhd_tbr_choice_var.get()})")
+        
+        pow_a, freqs_a, temps_a = analise_cwt_sinal(sinal_adhd, FS_AMOSTRA)
+        im_a = ax_wav_adhd.contourf(temps_a, freqs_a, pow_a, levels=20, cmap='viridis')
+        self._estilo_grafico_padrao(ax_wav_adhd, fig_wav, f"Wavelet TDAH ({self.var_tbr_adhd_indiv.get()})")
         fig_wav.colorbar(im_a, ax=ax_wav_adhd)
-        power_c, freqs_c, times_c = analyze_signal_with_wavelet(signal_ctrl, FS)
-        im_c = ax_wav_ctrl.contourf(times_c, freqs_c, power_c, levels=20, cmap='viridis')
-        self._apply_plot_style(ax_wav_ctrl, fig_wav, f"Wavelet Controle ({self.ctrl_tbr_choice_var.get()})")
+        
+        pow_c, freqs_c, temps_c = analise_cwt_sinal(sinal_ctrl, FS_AMOSTRA)
+        im_c = ax_wav_ctrl.contourf(temps_c, freqs_c, pow_c, levels=20, cmap='viridis')
+        self._estilo_grafico_padrao(ax_wav_ctrl, fig_wav, f"Wavelet Ctrl ({self.var_tbr_ctrl_indiv.get()})")
         fig_wav.colorbar(im_c, ax=ax_wav_ctrl)
         fig_wav.tight_layout()
         canvas_wav.draw()
+        
         fig_spec, (ax_spec_adhd, ax_spec_ctrl) = plt.subplots(1, 2, figsize=(10, 3.5))
-        canvas_spec = FigureCanvasTkAgg(fig_spec, master=self.spectrogram_frame)
+        canvas_spec = FigureCanvasTkAgg(fig_spec, master=self.frm_spec_plot)
         canvas_spec.get_tk_widget().pack(fill="both", expand=True)
-        freqs_sa, times_sa, Sxx_a = calculate_spectrogram(signal_adhd, FS)
-        im_sa = ax_spec_adhd.pcolormesh(times_sa, freqs_sa, 10*np.log10(Sxx_a), shading='gouraud', cmap='viridis')
-        self._apply_plot_style(ax_spec_adhd, fig_spec, f"Espectrograma TDAH ({self.adhd_tbr_choice_var.get()})")
+        
+        freqs_sa, temps_sa, Sxx_a = calc_espectrograma(sinal_adhd, FS_AMOSTRA)
+        im_sa = ax_spec_adhd.pcolormesh(temps_sa, freqs_sa, 10*np.log10(Sxx_a), shading='gouraud', cmap='viridis')
+        self._estilo_grafico_padrao(ax_spec_adhd, fig_spec, f"Espectro TDAH ({self.var_tbr_adhd_indiv.get()})")
         fig_spec.colorbar(im_sa, ax=ax_spec_adhd)
-        freqs_sc, times_sc, Sxx_c = calculate_spectrogram(signal_ctrl, FS)
-        im_sc = ax_spec_ctrl.pcolormesh(times_sc, freqs_sc, 10*np.log10(Sxx_c), shading='gouraud', cmap='viridis')
-        self._apply_plot_style(ax_spec_ctrl, fig_spec, f"Espectrograma Controle ({self.ctrl_tbr_choice_var.get()})")
+        
+        freqs_sc, temps_sc, Sxx_c = calc_espectrograma(sinal_ctrl, FS_AMOSTRA)
+        im_sc = ax_spec_ctrl.pcolormesh(temps_sc, freqs_sc, 10*np.log10(Sxx_c), shading='gouraud', cmap='viridis')
+        self._estilo_grafico_padrao(ax_spec_ctrl, fig_spec, f"Espectro Ctrl ({self.var_tbr_ctrl_indiv.get()})")
         fig_spec.colorbar(im_sc, ax=ax_spec_ctrl)
         fig_spec.tight_layout()
         canvas_spec.draw()
 
-    def create_average_analysis_tab(self):
-        for widget in self.tab_average.winfo_children(): widget.destroy()
-        self.gender_selector = ctk.CTkSegmentedButton(self.tab_average, values=["Geral", "Feminino", "Masculino"], command=self.plot_average_analyses, fg_color=COLORS["mauve"])
-        self.gender_selector.set("Geral")
-        self.gender_selector.pack(pady=10)
-        self.average_plots_frame = ctk.CTkFrame(self.tab_average, fg_color="transparent")
-        self.average_plots_frame.pack(fill="both", expand=True)
+    def setup_analise_media_ui(self):
+        for widget in self.tab_medias_analise.winfo_children(): widget.destroy()
+        self.genero_selecionar_media = ctk.CTkSegmentedButton(self.tab_medias_analise, values=["Geral", "Feminino", "Masculino"],
+                                                           command=self.atualizar_plots_media, fg_color=CORES["mauve"],
+                                                           selected_color=CORES["prune"], selected_hover_color=CORES["prune"],
+                                                           unselected_color=CORES["mauve"], unselected_hover_color=CORES["rosa"],
+                                                           text_color=CORES["blush"])
+        self.genero_selecionar_media.set("Geral")
+        self.genero_selecionar_media.pack(pady=10)
+        self.frame_plots_media_tab = ctk.CTkFrame(self.tab_medias_analise, fg_color="transparent")
+        self.frame_plots_media_tab.pack(fill="both", expand=True)
         
-    def plot_average_analyses(self, mode):
-        for widget in self.average_plots_frame.winfo_children(): widget.destroy()
+    def atualizar_plots_media(self, modo_gen):
+        for widget in self.frame_plots_media_tab.winfo_children(): widget.destroy()
         
-        adhd_signals = []
-        ctrl_signals = []
+        sinais_adhd = []
+        sinais_ctrl = []
 
-        if mode == "Geral":
-            adhd_signals = self.loaded_data['F-ADHD'] + self.loaded_data['M-ADHD']
-            ctrl_signals = self.loaded_data['F-Ctrl'] + self.loaded_data['M-Ctrl']
-        elif mode == "Feminino":
-            adhd_signals = self.loaded_data['F-ADHD']
-            ctrl_signals = self.loaded_data['F-Ctrl']
+        if modo_gen == "Geral":
+            sinais_adhd = self.dados_eeg_carregados.get('F-TDAH', []) + self.dados_eeg_carregados.get('M-TDAH', [])
+            sinais_ctrl = self.dados_eeg_carregados.get('F-Ctrl', []) + self.dados_eeg_carregados.get('M-Ctrl', [])
+        elif modo_gen == "Feminino":
+            sinais_adhd = self.dados_eeg_carregados.get('F-TDAH', [])
+            sinais_ctrl = self.dados_eeg_carregados.get('F-Ctrl', [])
         else: # Masculino
-            adhd_signals = self.loaded_data['M-ADHD']
-            ctrl_signals = self.loaded_data['M-Ctrl']
+            sinais_adhd = self.dados_eeg_carregados.get('M-TDAH', [])
+            sinais_ctrl = self.dados_eeg_carregados.get('M-Ctrl', [])
         
         fig_spec, (ax_spec_adhd, ax_spec_ctrl) = plt.subplots(1, 2, figsize=(10, 4))
-        canvas_spec = FigureCanvasTkAgg(fig_spec, master=self.average_plots_frame)
+        canvas_spec = FigureCanvasTkAgg(fig_spec, master=self.frame_plots_media_tab)
         canvas_spec.get_tk_widget().pack(fill="x", pady=5)
 
-        if adhd_signals:
-            min_len_adhd = min(s.shape[1] for s in adhd_signals)
-            all_sxx_adhd = [calculate_spectrogram(s[0, :min_len_adhd], FS)[2] for s in adhd_signals]
+        if sinais_adhd:
+            min_len_adhd = min(s.shape[1] for s in sinais_adhd)
+            all_sxx_adhd = [calc_espectrograma(s[0, :min_len_adhd], FS_AMOSTRA)[2] for s in sinais_adhd]
             avg_sxx_adhd = np.mean(all_sxx_adhd, axis=0)
-            freqs_adhd, times_adhd, _ = calculate_spectrogram(adhd_signals[0][0, :min_len_adhd], FS)
-            im_adhd = ax_spec_adhd.pcolormesh(times_adhd, freqs_adhd, 10 * np.log10(avg_sxx_adhd), shading='gouraud', cmap='viridis')
-            self._apply_plot_style(ax_spec_adhd, fig_spec, f"Espectrograma Médio TDAH ({mode})")
+            
+            # Aqui tem que usar um sinal pra pegar freqs e tempos. O primeiro serve.
+            freqs_adhd, temps_adhd, _ = calc_espectrograma(sinais_adhd[0][0, :min_len_adhd], FS_AMOSTRA)
+            
+            im_adhd = ax_spec_adhd.pcolormesh(temps_adhd, freqs_adhd, 10 * np.log10(avg_sxx_adhd), shading='gouraud', cmap='viridis')
+            self._estilo_grafico_padrao(ax_spec_adhd, fig_spec, f"Espectro Médio TDAH ({modo_gen})")
             fig_spec.colorbar(im_adhd, ax=ax_spec_adhd)
         else:
-            self._apply_plot_style(ax_spec_adhd, fig_spec, f"Espectrograma Médio TDAH ({mode})")
-            ax_spec_adhd.text(0.5, 0.5, "Nenhum dado disponível", horizontalalignment='center', verticalalignment='center', transform=ax_spec_adhd.transAxes, color=COLORS["text_dark"])
+            self._estilo_grafico_padrao(ax_spec_adhd, fig_spec, f"Espectro Médio TDAH ({modo_gen})")
+            ax_spec_adhd.text(0.5, 0.5, "Sem dados.", horizontalalignment='center', verticalalignment='center', transform=ax_spec_adhd.transAxes, color=CORES["text_dark"])
 
-        if ctrl_signals:
-            min_len_ctrl = min(s.shape[1] for s in ctrl_signals)
-            all_sxx_ctrl = [calculate_spectrogram(s[0, :min_len_ctrl], FS)[2] for s in ctrl_signals]
+        if sinais_ctrl:
+            min_len_ctrl = min(s.shape[1] for s in sinais_ctrl)
+            all_sxx_ctrl = [calc_espectrograma(s[0, :min_len_ctrl], FS_AMOSTRA)[2] for s in sinais_ctrl]
             avg_sxx_ctrl = np.mean(all_sxx_ctrl, axis=0)
-            freqs_ctrl, times_ctrl, _ = calculate_spectrogram(ctrl_signals[0][0, :min_len_ctrl], FS)
-            im_ctrl = ax_spec_ctrl.pcolormesh(times_ctrl, freqs_ctrl, 10 * np.log10(avg_sxx_ctrl), shading='gouraud', cmap='viridis')
-            self._apply_plot_style(ax_spec_ctrl, fig_spec, f"Espectrograma Médio Controle ({mode})")
+            
+            freqs_ctrl, temps_ctrl, _ = calc_espectrograma(sinais_ctrl[0][0, :min_len_ctrl], FS_AMOSTRA)
+            
+            im_ctrl = ax_spec_ctrl.pcolormesh(temps_ctrl, freqs_ctrl, 10 * np.log10(avg_sxx_ctrl), shading='gouraud', cmap='viridis')
+            self._estilo_grafico_padrao(ax_spec_ctrl, fig_spec, f"Espectro Médio Ctrl ({modo_gen})")
             fig_spec.colorbar(im_ctrl, ax=ax_spec_ctrl)
         else:
-            self._apply_plot_style(ax_spec_ctrl, fig_spec, f"Espectrograma Médio Controle ({mode})")
-            ax_spec_ctrl.text(0.5, 0.5, "Nenhum dado disponível", horizontalalignment='center', verticalalignment='center', transform=ax_spec_ctrl.transAxes, color=COLORS["text_dark"])
+            self._estilo_grafico_padrao(ax_spec_ctrl, fig_spec, f"Espectro Médio Ctrl ({modo_gen})")
+            ax_spec_ctrl.text(0.5, 0.5, "Sem dados.", horizontalalignment='center', verticalalignment='center', transform=ax_spec_ctrl.transAxes, color=CORES["text_dark"])
 
         fig_spec.tight_layout()
         canvas_spec.draw()
     
-    def create_sliding_window_analysis_tab(self):
-        for widget in self.tab_sliding.winfo_children(): widget.destroy()
+    def setup_analise_sliding_ui(self):
+        for widget in self.tab_sliding_analise.winfo_children(): widget.destroy()
 
-        control_panel = ctk.CTkFrame(self.tab_sliding, fg_color=COLORS["blush"])
-        control_panel.pack(fill="x", pady=10, padx=10)
+        ctrl_pnl = ctk.CTkFrame(self.tab_sliding_analise, fg_color=CORES["blush"])
+        ctrl_pnl.pack(fill="x", pady=10, padx=10)
 
-        ctk.CTkLabel(control_panel, text="Caso TDAH:", text_color=COLORS["text_dark"]).pack(side="left", padx=(10,5))
-        ctk.CTkComboBox(control_panel, variable=self.sliding_adhd_tbr_choice_var, values=["TBR Mais Alto", "TBR Mais Baixo"], command=lambda x: self.update_sliding_window_plots()).pack(side="left", padx=5)
+        ctk.CTkLabel(ctrl_pnl, text="Caso TDAH:", text_color=CORES["text_dark"]).pack(side="left", padx=(10,5))
+        ctk.CTkComboBox(ctrl_pnl, variable=self.var_sliding_adhd_tbr, values=["TBR Mais Alto", "TBR Mais Baixo"],
+                        command=lambda x: self.atualizar_plots_sliding()).pack(side="left", padx=5)
 
-        ctk.CTkLabel(control_panel, text="Caso Controle:", text_color=COLORS["text_dark"]).pack(side="left", padx=(20,5))
-        ctk.CTkComboBox(control_panel, variable=self.sliding_ctrl_tbr_choice_var, values=["TBR Mais Alto", "TBR Mais Baixo"], command=lambda x: self.update_sliding_window_plots()).pack(side="left", padx=5)
+        ctk.CTkLabel(ctrl_pnl, text="Caso Ctrl:", text_color=CORES["text_dark"]).pack(side="left", padx=(20,5))
+        ctk.CTkComboBox(ctrl_pnl, variable=self.var_sliding_ctrl_tbr, values=["TBR Mais Alto", "TBR Mais Baixo"],
+                        command=lambda x: self.atualizar_plots_sliding()).pack(side="left", padx=5)
         
-        self.sliding_gender_selector = ctk.CTkSegmentedButton(control_panel, values=["Geral", "Feminino", "Masculino"], command=self.update_sliding_window_plots, fg_color=COLORS["mauve"], variable=self.sliding_gender_selector_var)
-        self.sliding_gender_selector.set("Geral")
-        self.sliding_gender_selector.pack(side="right", padx=10)
+        self.sel_genero_sliding = ctk.CTkSegmentedButton(ctrl_pnl, values=["Geral", "Feminino", "Masculino"],
+                                                           command=self.atualizar_plots_sliding, fg_color=CORES["mauve"],
+                                                           selected_color=CORES["prune"], selected_hover_color=CORES["prune"],
+                                                           unselected_color=CORES["mauve"], unselected_hover_color=CORES["rosa"],
+                                                           text_color=CORES["blush"], variable=self.var_sliding_gen_sel)
+        self.sel_genero_sliding.set("Geral")
+        self.sel_genero_sliding.pack(side="right", padx=10)
         
-        self.sliding_plots_frame = ctk.CTkFrame(self.tab_sliding, fg_color="transparent")
-        self.sliding_plots_frame.pack(fill="both", expand=True, pady=5)
+        self.frame_plots_sliding_tab = ctk.CTkFrame(self.tab_sliding_analise, fg_color="transparent")
+        self.frame_plots_sliding_tab.pack(fill="both", expand=True, pady=5)
 
-    def update_sliding_window_plots(self, *args):
-        for widget in self.sliding_plots_frame.winfo_children(): widget.destroy()
+    def atualizar_plots_sliding(self, *args):
+        for widget in self.frame_plots_sliding_tab.winfo_children(): widget.destroy()
 
-        gender_mode = self.sliding_gender_selector_var.get()
-        adhd_tbr_mode = self.sliding_adhd_tbr_choice_var.get()
-        ctrl_tbr_mode = self.sliding_ctrl_tbr_choice_var.get()
+        modo_gen = self.var_sliding_gen_sel.get()
+        modo_tbr_adhd = self.var_sliding_adhd_tbr.get()
+        modo_tbr_ctrl = self.var_sliding_ctrl_tbr.get()
 
-        adhd_signals_filtered = []
-        adhd_tbr_filtered = []
-        ctrl_signals_filtered = []
-        ctrl_tbr_filtered = []
+        sinais_adhd_filtr = []
+        tbr_adhd_filtr = []
+        sinais_ctrl_filtr = []
+        tbr_ctrl_filtr = []
 
-        if gender_mode == "Geral":
-            adhd_signals_filtered = self.loaded_data['F-ADHD'] + self.loaded_data['M-ADHD']
-            adhd_tbr_filtered = self.analysis_results['tbr_by_group']['F-ADHD'] + self.analysis_results['tbr_by_group']['M-ADHD']
-            ctrl_signals_filtered = self.loaded_data['F-Ctrl'] + self.loaded_data['M-Ctrl']
-            ctrl_tbr_filtered = self.analysis_results['tbr_by_group']['F-Ctrl'] + self.analysis_results['tbr_by_group']['M-Ctrl']
-        elif gender_mode == "Feminino":
-            adhd_signals_filtered = self.loaded_data['F-ADHD']
-            adhd_tbr_filtered = self.analysis_results['tbr_by_group']['F-ADHD']
-            ctrl_signals_filtered = self.loaded_data['F-Ctrl']
-            ctrl_tbr_filtered = self.analysis_results['tbr_by_group']['F-Ctrl']
+        if modo_gen == "Geral":
+            sinais_adhd_filtr = self.dados_eeg_carregados.get('F-TDAH', []) + self.dados_eeg_carregados.get('M-TDAH', [])
+            tbr_adhd_filtr = self.resultados_analise_obj['tbr_por_grupo'].get('F-TDAH', []) + self.resultados_analise_obj['tbr_por_grupo'].get('M-TDAH', [])
+            sinais_ctrl_filtr = self.dados_eeg_carregados.get('F-Ctrl', []) + self.dados_eeg_carregados.get('M-Ctrl', [])
+            tbr_ctrl_filtr = self.resultados_analise_obj['tbr_por_grupo'].get('F-Ctrl', []) + self.resultados_analise_obj['tbr_por_grupo'].get('M-Ctrl', [])
+        elif modo_gen == "Feminino":
+            sinais_adhd_filtr = self.dados_eeg_carregados.get('F-TDAH', [])
+            tbr_adhd_filtr = self.resultados_analise_obj['tbr_por_grupo'].get('F-TDAH', [])
+            sinais_ctrl_filtr = self.dados_eeg_carregados.get('F-Ctrl', [])
+            tbr_ctrl_filtr = self.resultados_analise_obj['tbr_por_grupo'].get('F-Ctrl', [])
         else: # Masculino
-            adhd_signals_filtered = self.loaded_data['M-ADHD']
-            adhd_tbr_filtered = self.analysis_results['tbr_by_group']['M-ADHD']
-            ctrl_signals_filtered = self.loaded_data['M-Ctrl']
-            ctrl_tbr_filtered = self.analysis_results['tbr_by_group']['M-Ctrl']
+            sinais_adhd_filtr = self.dados_eeg_carregados.get('M-TDAH', [])
+            tbr_adhd_filtr = self.resultados_analise_obj['tbr_por_grupo'].get('M-TDAH', [])
+            sinais_ctrl_filtr = self.dados_eeg_carregados.get('M-Ctrl', [])
+            tbr_ctrl_filtr = self.resultados_analise_obj['tbr_por_grupo'].get('M-Ctrl', [])
 
-        if not adhd_signals_filtered or not ctrl_signals_filtered:
-            ctk.CTkLabel(self.sliding_plots_frame, text="Nenhum dado disponível para as seleções atuais.",
-                         text_color=COLORS["text_dark"], font=ctk.CTkFont(size=14)).pack(pady=50)
+        if not sinais_adhd_filtr or not sinais_ctrl_filtr:
+            ctk.CTkLabel(self.frame_plots_sliding_tab, text="Sem dados para esta seleção.",
+                         text_color=CORES["text_dark"], font=ctk.CTkFont(size=14)).pack(pady=50)
             return
 
-        idx_adhd = np.argmax(adhd_tbr_filtered) if adhd_tbr_mode == "TBR Mais Alto" else np.argmin(adhd_tbr_filtered)
-        idx_ctrl = np.argmax(ctrl_tbr_filtered) if ctrl_tbr_mode == "TBR Mais Alto" else np.argmin(ctrl_tbr_filtered)
+        idx_adhd = np.argmax(tbr_adhd_filtr) if modo_tbr_adhd == "TBR Mais Alto" else np.argmin(tbr_adhd_filtr)
+        idx_ctrl = np.argmax(tbr_ctrl_filtr) if modo_tbr_ctrl == "TBR Mais Alto" else np.argmin(tbr_ctrl_filtr)
 
-        signal_adhd = adhd_signals_filtered[idx_adhd][0, :]
-        signal_ctrl = ctrl_signals_filtered[idx_ctrl][0, :]
+        sinal_adhd_sel = sinais_adhd_filtr[idx_adhd][0, :]
+        sinal_ctrl_sel = sinais_ctrl_filtr[idx_ctrl][0, :]
         
-        # Aumentar o figsize (tamanho da figura) e ajustar o espaçamento
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True) # Aumentado de (10, 6) para (12, 8)
-        
-        # Ajustar manualmente os subplots para dar mais espaço aos títulos
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
         fig.subplots_adjust(top=0.9, bottom=0.1, left=0.08, right=0.98, hspace=0.4, wspace=0.3)
 
-        canvas = FigureCanvasTkAgg(fig, master=self.sliding_plots_frame)
+        canvas = FigureCanvasTkAgg(fig, master=self.frame_plots_sliding_tab)
         canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
 
-        self._plot_single_sliding_analysis(axes[:, 0], signal_adhd, FS, f"TDAH ({gender_mode} - {adhd_tbr_mode})")
-        self._plot_single_sliding_analysis(axes[:, 1], signal_ctrl, FS, f"Controle ({gender_mode} - {ctrl_tbr_mode})")
+        self._plot_sliding_mean_var(axes[:, 0], sinal_adhd_sel, FS_AMOSTRA, f"TDAH ({modo_gen} - {modo_tbr_adhd})")
+        self._plot_sliding_mean_var(axes[:, 1], sinal_ctrl_sel, FS_AMOSTRA, f"Ctrl ({modo_gen} - {modo_tbr_ctrl})")
 
         canvas.draw()
         
-    def _plot_single_sliding_analysis(self, axes, signal, fs, title_prefix):
-        window_size_sec = 1.0
-        window_samples = int(window_size_sec * fs)
-        step_samples = window_samples // 4
-        means, variances, time_points = [], [], []
+    def _plot_sliding_mean_var(self, eixos, sinal, fs_hz, prefixo_titulo):
+        win_size_sec = 1.0 # Janela de 1s
+        win_samples = int(win_size_sec * fs_hz)
+        step_samples = win_samples // 4 # 25% passo
+        
+        means, vars, time_pts = [], [], []
 
-        for i in range(0, len(signal) - window_samples + 1, step_samples):
-            window = signal[i:i + window_samples]
+        for i in range(0, len(sinal) - win_samples + 1, step_samples):
+            window = sinal[i:i + win_samples]
             means.append(np.mean(window))
-            variances.append(np.var(window))
-            time_points.append((i + window_samples / 2) / fs)
+            vars.append(np.var(window))
+            time_pts.append((i + win_samples / 2) / fs_hz)
         
-        ax_mean, ax_var = axes[0], axes[1]
+        ax_mean, ax_var = eixos[0], eixos[1]
         
-        ax_mean.plot(time_points, means, color=COLORS["prune"])
-        self._apply_plot_style(ax_mean, ax_mean.get_figure(), f"Média - {title_prefix}") # Título mais curto
+        ax_mean.plot(time_pts, means, color=CORES["prune"])
+        self._estilo_grafico_padrao(ax_mean, ax_mean.get_figure(), f"Média - {prefixo_titulo}")
         ax_mean.set_ylabel("Média (µV)")
         
-        ax_var.plot(time_points, variances, color=COLORS["mauve"])
-        self._apply_plot_style(ax_var, ax_var.get_figure(), f"Variância - {title_prefix}") # Título mais curto
+        ax_var.plot(time_pts, vars, color=CORES["mauve"])
+        self._estilo_grafico_padrao(ax_var, ax_var.get_figure(), f"Variância - {prefixo_titulo}")
         ax_var.set_ylabel("Variância (µV²)")
         ax_var.set_xlabel("Tempo (s)")
 
-# --- Bloco de Execução Principal ---
+# --- Bloco Exec Principal ---
 if __name__ == "__main__":
-    app = EEGAnalyzerApp()
+    app = AppEEG()
     app.mainloop()
