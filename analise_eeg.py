@@ -264,7 +264,7 @@ class TelaResultadosUI(ctk.CTkFrame):
         canvas.draw()
         
         ctk.CTkButton(self.tab_grupo_comp, text="💡 Entender TBR", corner_radius=10, fg_color=CORES["mauve"], text_color=CORES["blush"],
-                      command=lambda: messagebox.showinfo("TBR Insight", "TBR alta em TDAH pode sugerir maturação cerebral mais lenta. Gênero ajuda a ver variações.")).pack(pady=10, padx=20)
+                      command=lambda: messagebox.showinfo("TBR Insight", "Uma Razão Teta/Beta (TBR) mais alta no grupo TDAH é um biomarcador comum, sugerindo uma maturação cerebral mais lenta. A separação por gênero permite investigar se há diferenças neste padrão.")).pack(pady=10, padx=20)
         
     def setup_analise_indiv_ui(self):
         for widget in self.tab_indiv_analise.winfo_children(): widget.destroy()
